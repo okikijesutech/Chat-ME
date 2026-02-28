@@ -27,6 +27,9 @@ interface Message {
 interface Room {
   id: string;
   name: string;
+  is_private?: boolean;
+  user_id_1?: string;
+  user_id_2?: string;
 }
 
 interface PresenceState {
@@ -71,15 +74,62 @@ export default function ChatPage() {
   }, [router]);
 
   const fetchRooms = async () => {
+    // We fetch all rooms we have access to (RLS handles filtering out unauthorized private rooms)
     const { data, error } = await supabase.from('rooms').select('*').order('created_at', { ascending: true });
     if (data && data.length > 0) {
       setRooms(data);
       if (!activeRoom) {
-        setActiveRoom(data[0]);
-        fetchMessages(data[0].id);
+        // Default to the first public room
+        const firstPublic = data.find(r => !r.is_private) || data[0];
+        setActiveRoom(firstPublic);
+        fetchMessages(firstPublic.id);
       }
     } else {
       setLoading(false);
+    }
+  };
+
+  const handleCreatePrivateChat = async (otherUserId: string, otherUserName: string) => {
+    if (!user) return;
+    
+    // Check if DM room already exists between these two users
+    const existingRoom = rooms.find(r => 
+      r.is_private && 
+      ((r.user_id_1 === user.id && r.user_id_2 === otherUserId) || 
+       (r.user_id_1 === otherUserId && r.user_id_2 === user.id))
+    );
+
+    if (existingRoom) {
+      setActiveRoom(existingRoom);
+      fetchMessages(existingRoom.id);
+      if (window.innerWidth < 768) {
+        setShowUsersPanel(false);
+      }
+      return;
+    }
+
+    // Create a new private room
+    const roomName = `${user.user_metadata.full_name} & ${otherUserName}`;
+    const { data, error } = await supabase
+      .from('rooms')
+      .insert([{ 
+        name: roomName, 
+        is_private: true, 
+        user_id_1: user.id, 
+        user_id_2: otherUserId 
+      }])
+      .select();
+
+    if (error) {
+      console.error('Error creating private chat:', error);
+      alert('Failed to create private chat.');
+    } else if (data) {
+      setRooms(prev => [...prev, data[0]]);
+      setActiveRoom(data[0]);
+      fetchMessages(data[0].id);
+      if (window.innerWidth < 768) {
+        setShowUsersPanel(false);
+      }
     }
   };
 
@@ -341,6 +391,7 @@ export default function ChatPage() {
         </div>
 
         <nav className="flex-1 px-4 space-y-2 overflow-y-auto scrollbar-premium">
+          {/* Public Channels */}
           <div className="mb-6">
             <div className="flex items-center justify-between px-2 mb-2">
               <p className="text-xs font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
@@ -353,10 +404,10 @@ export default function ChatPage() {
                 + Add
               </button>
             </div>
-            {rooms.length === 0 && (
+            {rooms.filter(r => !r.is_private).length === 0 && (
               <p className="px-2 text-sm text-[var(--color-text-muted)] italic">No channels yet.</p>
             )}
-            {rooms.map((room) => (
+            {rooms.filter(r => !r.is_private).map((room) => (
               <button
                 key={room.id}
                 onClick={() => {
@@ -374,10 +425,51 @@ export default function ChatPage() {
                     : "text-[var(--color-text-secondary)] hover:bg-white/5 hover:text-white"
                 )}
               >
-                <Hash className="h-4 w-4 opacity-50" />
+                <Hash className="h-4 w-4 opacity-50 flex-shrink-0" />
                 <span className="font-medium truncate">{room.name}</span>
               </button>
             ))}
+          </div>
+
+          {/* Direct Messages */}
+          <div className="mb-6">
+            <p className="px-2 text-xs font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-2">
+              Direct Messages
+            </p>
+            {rooms.filter(r => r.is_private).length === 0 && (
+              <p className="px-2 text-sm text-[var(--color-text-muted)] italic">No private chats yet.</p>
+            )}
+            {rooms.filter(r => r.is_private).map((room) => {
+              // For DMs, show the name of the *other* person. 
+              // We'll roughly parse it from the combined name, or just show the full name.
+              const parts = room.name.split(' & ');
+              const displayName = parts.find(p => p !== user?.user_metadata?.full_name) || room.name;
+
+              return (
+                <button
+                  key={room.id}
+                  onClick={() => {
+                    setActiveRoom(room);
+                    fetchMessages(room.id);
+                    if (window.innerWidth < 768) {
+                      setShowUsersPanel(false);
+                      setShowSettingsPanel(false);
+                    }
+                  }}
+                  className={cn(
+                    "w-full flex items-center gap-3 px-3 py-2 rounded-xl transition-all",
+                    activeRoom?.id === room.id 
+                      ? "bg-white/10 text-white shadow-lg" 
+                      : "text-[var(--color-text-secondary)] hover:bg-white/5 hover:text-white"
+                  )}
+                >
+                  <div className="h-5 w-5 rounded-full bg-gradient-to-br from-indigo-500/20 to-purple-500/20 flex items-center justify-center text-[8px] font-bold border border-white/5 flex-shrink-0">
+                    {displayName[0]}
+                  </div>
+                  <span className="font-medium truncate">{displayName}</span>
+                </button>
+              );
+            })}
           </div>
 
           <div>
@@ -424,10 +516,19 @@ export default function ChatPage() {
         <header className="h-16 flex items-center justify-between px-6 glass-nav border-b border-white/5 z-10">
           <div className="flex items-center gap-3">
             <div className="h-8 w-8 rounded-lg bg-white/5 flex items-center justify-center">
-              <Hash className="h-4 w-4 text-[var(--color-brand-primary)]" />
+              {activeRoom?.is_private ? (
+                <UserIcon className="h-4 w-4 text-purple-400" />
+              ) : (
+                <Hash className="h-4 w-4 text-[var(--color-brand-primary)]" />
+              )}
             </div>
             <div>
-              <h1 className="font-bold">{activeRoom?.name || 'Select a channel'}</h1>
+              <h1 className="font-bold">
+                {activeRoom?.is_private 
+                  ? (activeRoom.name.split(' & ').find(p => p !== user?.user_metadata?.full_name) || activeRoom.name)
+                  : (activeRoom?.name || 'Select a channel')
+                }
+              </h1>
               {activeRoom && (
                 <p className="text-xs text-[var(--color-text-accent)] flex items-center gap-1.5">
                   <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]" />
@@ -553,19 +654,32 @@ export default function ChatPage() {
                      </button>
                    </div>
                    <div className="space-y-3">
-                      {Object.values(onlineUsers).map((u: any) => (
-                        <div key={u.user_id} className="flex items-center gap-3">
-                          <div className="relative">
+                       {Object.values(onlineUsers).map((u: any) => (
+                        <button 
+                          key={u.user_id} 
+                          onClick={() => {
+                            if (u.user_id !== user?.id) {
+                              handleCreatePrivateChat(u.user_id, u.full_name);
+                            }
+                          }}
+                          className={cn(
+                            "w-full flex items-center gap-3 p-2 rounded-xl transition-colors text-left",
+                            u.user_id === user?.id 
+                              ? "cursor-default opacity-70" 
+                              : "hover:bg-white/5 group"
+                          )}
+                        >
+                          <div className="relative flex-shrink-0">
                             <div className="h-2 w-2 rounded-full bg-green-500 absolute -right-0.5 -bottom-0.5" />
-                            <div className="h-8 w-8 rounded-full bg-white/10 flex items-center justify-center font-bold text-xs">
+                            <div className="h-8 w-8 rounded-full bg-white/10 flex items-center justify-center font-bold text-xs group-hover:border-[var(--color-brand-primary)]/50 border border-transparent transition-colors">
                               {u.full_name?.[0]}
                             </div>
                           </div>
-                          <div>
-                            <p className="text-sm font-medium">{u.full_name}</p>
-                            <p className="text-xs text-[var(--color-text-muted)]">Online</p>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium truncate">{u.full_name} {u.user_id === user?.id && '(You)'}</p>
+                            <p className="text-xs text-[var(--color-text-muted)] truncate">Online</p>
                           </div>
-                        </div>
+                        </button>
                       ))}
                    </div>
                  </div>
