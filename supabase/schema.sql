@@ -66,3 +66,6 @@ CREATE TRIGGER on_auth_user_created
 
 -- Insert a default room
 INSERT INTO public.rooms (name) VALUES ('General Chat');
+
+-- Performance Indexes
+CREATE INDEX IF NOT EXISTS idx_messages_room_created ON public.messages(room_id, created_at);

@@ -21,9 +21,6 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(true);
   const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
   const [onlineUsers, setOnlineUsers] = useState<Record<string, any>>({});
-  const [showScrollButton, setShowScrollButton] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const router = useRouter();
 
@@ -129,7 +126,6 @@ export default function ChatPage() {
 
     if (data) setMessages(data);
     setLoading(false);
-    scrollToBottom();
   };
 
   // Real-time Subscription (Messages & Presence)
@@ -162,7 +158,6 @@ export default function ChatPage() {
                     if (prev.some(m => m.id === data.id || (m.content === data.content && m.user_id === data.user_id))) {
                        return prev;
                     }
-                    if (!showScrollButton) scrollToBottom();
                     return [...prev, data];
                   });
                 }
@@ -249,7 +244,6 @@ export default function ChatPage() {
     };
     
     setMessages(prev => [...prev, tempMessage]);
-    scrollToBottom();
 
     const { error } = await supabase.from('messages').insert({
       content,
@@ -267,18 +261,6 @@ export default function ChatPage() {
   const handleLogout = async () => {
     await supabase.auth.signOut();
     router.push('/login');
-  };
-
-  const scrollToBottom = () => {
-    setTimeout(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, 100);
-  };
-
-  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
-    const isAtBottom = scrollHeight - scrollTop - clientHeight < 100;
-    setShowScrollButton(!isAtBottom);
   };
 
   return (
@@ -365,9 +347,6 @@ export default function ChatPage() {
             user={user}
             hasNoChannels={rooms.filter(r => !r.is_private).length === 0}
             onCreateChannelClick={() => setIsCreatingChannel(true)}
-            messagesEndRef={messagesEndRef}
-            scrollContainerRef={scrollContainerRef}
-            onScroll={handleScroll}
           />
 
           {/* Extracted Side Panels */}
@@ -383,16 +362,6 @@ export default function ChatPage() {
           />
 
         </div>
-
-        {/* Scroll to bottom button */}
-        {showScrollButton && activeRoom && (
-          <button
-            onClick={scrollToBottom}
-            className="absolute bottom-24 right-8 p-3 rounded-full bg-[var(--color-brand-primary)] text-white shadow-2xl animate-bounce hover:scale-110 transition-transform active:scale-95 z-20"
-          >
-            <ChevronDown className="h-5 w-5" />
-          </button>
-        )}
 
         {/* Extracted Message Input */}
         <MessageInput
