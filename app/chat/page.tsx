@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
-import { LogOut, Send, User as UserIcon, Settings, Hash, Users, ChevronDown } from 'lucide-react';
+import { LogOut, Send, User as UserIcon, Settings, Hash, Users, ChevronDown, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { formatRelative } from 'date-fns';
 import DOMPurify from 'dompurify';
@@ -51,6 +51,11 @@ export default function ChatPage() {
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const router = useRouter();
 
+  const [isCreatingChannel, setIsCreatingChannel] = useState(false);
+  const [newChannelName, setNewChannelName] = useState('');
+  const [showUsersPanel, setShowUsersPanel] = useState(false);
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+
   // Initial Fetch
   useEffect(() => {
     const checkUser = async () => {
@@ -66,11 +71,36 @@ export default function ChatPage() {
   }, [router]);
 
   const fetchRooms = async () => {
-    const { data, error } = await supabase.from('rooms').select('*');
+    const { data, error } = await supabase.from('rooms').select('*').order('created_at', { ascending: true });
     if (data && data.length > 0) {
       setRooms(data);
+      if (!activeRoom) {
+        setActiveRoom(data[0]);
+        fetchMessages(data[0].id);
+      }
+    } else {
+      setLoading(false);
+    }
+  };
+
+  const handleCreateChannel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newChannelName.trim()) return;
+
+    const { data, error } = await supabase
+      .from('rooms')
+      .insert([{ name: newChannelName.trim() }])
+      .select();
+
+    if (error) {
+      console.error('Error creating channel:', error);
+      alert('Failed to create channel. Make sure you ran the SQL policy command!');
+    } else if (data) {
+      setRooms(prev => [...prev, data[0]]);
       setActiveRoom(data[0]);
       fetchMessages(data[0].id);
+      setIsCreatingChannel(false);
+      setNewChannelName('');
     }
   };
 
@@ -109,18 +139,41 @@ export default function ChatPage() {
           filter: `room_id=eq.${activeRoom.id}`,
         },
         async (payload) => {
-          const { data } = await supabase
-            .from('messages')
-            .select('*, profiles(full_name, avatar_url)')
-            .eq('id', payload.new.id)
-            .single();
+          // Check if we already have this message (e.g., from an optimistic update)
+          // We can't check by ID because optimistic updates use temp IDs,
+          // but we can check by content and proximity in time.
+          // For simplicity, we'll just check if the exact content was recently added by this user.
+          
+          setMessages((current) => {
+            const isDuplicate = current.some(
+              (m) => m.content === payload.new.content && m.user_id === payload.new.user_id
+            );
+            
+            if (isDuplicate) return current;
 
-          if (data) {
-            setMessages((current) => [...current, data]);
-            if (!showScrollButton) {
-              scrollToBottom();
-            }
-          }
+            // Fetch the full message with profile data only if we don't already have it
+            supabase
+              .from('messages')
+              .select('*, profiles(full_name, avatar_url)')
+              .eq('id', payload.new.id)
+              .single()
+              .then(({ data }) => {
+                if (data) {
+                  setMessages((prev) => {
+                    // Double check again just before inserting to be strictly safe
+                    if (prev.some(m => m.id === data.id || (m.content === data.content && m.user_id === data.user_id))) {
+                       return prev;
+                    }
+                    if (!showScrollButton) {
+                      scrollToBottom();
+                    }
+                    return [...prev, data];
+                  });
+                }
+              });
+
+            return current;
+          });
         }
       )
       .on('presence', { event: 'sync' }, () => {
@@ -194,6 +247,21 @@ export default function ChatPage() {
         is_typing: false,
     });
 
+    // Optimistic Update: instantly show message in UI
+    const tempMessage: Message = {
+      id: crypto.randomUUID(), // temp ID
+      content: content,
+      created_at: new Date().toISOString(),
+      user_id: user.id,
+      profiles: {
+        full_name: user.user_metadata?.full_name || 'Me',
+        avatar_url: user.user_metadata?.avatar_url || '',
+      }
+    };
+    
+    setMessages(prev => [...prev, tempMessage]);
+    scrollToBottom();
+
     const { error } = await supabase.from('messages').insert({
       content,
       room_id: activeRoom.id,
@@ -202,6 +270,9 @@ export default function ChatPage() {
 
     if (error) {
       console.error('Error sending message:', error);
+      // Revert optimistic update on failure
+      setMessages(prev => prev.filter(m => m.id !== tempMessage.id));
+      alert('Failed to send message: ' + error.message);
     }
   };
 
@@ -223,7 +294,43 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex h-screen bg-[var(--color-bg-main)] text-[var(--color-text-primary)]">
+    <div className="flex h-screen bg-[var(--color-bg-main)] text-[var(--color-text-primary)] relative">
+      
+      {/* Create Channel Modal */}
+      {isCreatingChannel && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in p-4">
+          <div className="premium-card p-6 w-full max-w-sm">
+            <h3 className="text-xl font-bold mb-4 text-white">Create New Channel</h3>
+            <form onSubmit={handleCreateChannel}>
+              <input
+                type="text"
+                autoFocus
+                placeholder="e.g. general, frontend-devs"
+                value={newChannelName}
+                onChange={(e) => setNewChannelName(e.target.value)}
+                className="w-full premium-input mb-4"
+              />
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsCreatingChannel(false)}
+                  className="px-4 py-2 rounded-xl text-sm font-medium hover:bg-white/10 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!newChannelName.trim()}
+                  className="premium-button text-sm !px-4 !py-2"
+                >
+                  Create
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Sidebar */}
       <aside className="w-64 glass-nav flex flex-col border-r border-white/5 z-20">
         <div className="p-6">
@@ -235,15 +342,30 @@ export default function ChatPage() {
 
         <nav className="flex-1 px-4 space-y-2 overflow-y-auto scrollbar-premium">
           <div className="mb-6">
-            <p className="px-2 text-xs font-semibold text-[var(--color-text-muted)] uppercase tracking-wider mb-2">
-              Channels
-            </p>
+            <div className="flex items-center justify-between px-2 mb-2">
+              <p className="text-xs font-semibold text-[var(--color-text-muted)] uppercase tracking-wider">
+                Channels
+              </p>
+              <button 
+                onClick={() => setIsCreatingChannel(true)}
+                className="text-xs text-[var(--color-brand-primary)] hover:text-white transition-colors"
+              >
+                + Add
+              </button>
+            </div>
+            {rooms.length === 0 && (
+              <p className="px-2 text-sm text-[var(--color-text-muted)] italic">No channels yet.</p>
+            )}
             {rooms.map((room) => (
               <button
                 key={room.id}
                 onClick={() => {
                   setActiveRoom(room);
                   fetchMessages(room.id);
+                  if (window.innerWidth < 768) {
+                    setShowUsersPanel(false);
+                    setShowSettingsPanel(false);
+                  }
                 }}
                 className={cn(
                   "w-full flex items-center gap-3 px-3 py-2 rounded-xl transition-all",
@@ -253,7 +375,7 @@ export default function ChatPage() {
                 )}
               >
                 <Hash className="h-4 w-4 opacity-50" />
-                <span className="font-medium">{room.name}</span>
+                <span className="font-medium truncate">{room.name}</span>
               </button>
             ))}
           </div>
@@ -305,135 +427,236 @@ export default function ChatPage() {
               <Hash className="h-4 w-4 text-[var(--color-brand-primary)]" />
             </div>
             <div>
-              <h1 className="font-bold">{activeRoom?.name || 'Loading...'}</h1>
-              <p className="text-xs text-[var(--color-text-accent)] flex items-center gap-1.5">
-                <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]" />
-                {Object.keys(onlineUsers).length} active now
-              </p>
+              <h1 className="font-bold">{activeRoom?.name || 'Select a channel'}</h1>
+              {activeRoom && (
+                <p className="text-xs text-[var(--color-text-accent)] flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]" />
+                  {Object.keys(onlineUsers).length} active now
+                </p>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-4">
-            <button className="p-2 rounded-lg hover:bg-white/5 transition-colors">
-              <Users className="h-5 w-5 text-[var(--color-text-secondary)]" />
+            <button 
+              onClick={() => {
+                setShowUsersPanel(!showUsersPanel);
+                setShowSettingsPanel(false);
+              }}
+              className={cn("p-2 rounded-lg transition-colors", showUsersPanel ? "bg-[var(--color-brand-primary)]/20 text-[var(--color-brand-primary)]" : "hover:bg-white/5 text-[var(--color-text-secondary)]")}
+              title="Toggle Users"
+            >
+              <Users className="h-5 w-5" />
             </button>
-            <button className="p-2 rounded-lg hover:bg-white/5 transition-colors">
-              <Settings className="h-5 w-5 text-[var(--color-text-secondary)]" />
+            <button 
+              onClick={() => {
+                setShowSettingsPanel(!showSettingsPanel);
+                setShowUsersPanel(false);
+              }}
+              className={cn("p-2 rounded-lg transition-colors", showSettingsPanel ? "bg-[var(--color-brand-primary)]/20 text-[var(--color-brand-primary)]" : "hover:bg-white/5 text-[var(--color-text-secondary)]")}
+              title="Chat Settings"
+            >
+              <Settings className="h-5 w-5" />
             </button>
           </div>
         </header>
 
-        {/* Message List */}
-        <div 
-          ref={scrollContainerRef}
-          onScroll={handleScroll}
-          className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-premium"
-        >
-          {loading ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-[var(--color-brand-primary)]" />
-            </div>
-          ) : messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full text-[var(--color-text-muted)] italic">
-              <Send className="h-12 w-12 mb-4 opacity-10" />
-              <p>No messages yet. Start the conversation!</p>
-            </div>
-          ) : (
-            messages.map((msg, idx) => {
-              const isOwn = msg.user_id === user?.id;
-              const cleanContent = DOMPurify.sanitize(msg.content);
-              
-              return (
-                <div 
-                  key={msg.id} 
-                  className={cn(
-                    "flex gap-4 animate-fade-in group/item",
-                    isOwn ? "flex-row-reverse" : "flex-row"
-                  )}
-                  style={{ animationDelay: `${idx * 20}ms` }}
+        {/* Dynamic Panels Layout Sequence */}
+        <div className="flex-1 flex overflow-hidden relative">
+          
+          {/* Messages Area */}
+          <div 
+            ref={scrollContainerRef}
+            onScroll={handleScroll}
+            className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-premium flex flex-col"
+          >
+            {!activeRoom ? (
+               <div className="flex flex-col items-center justify-center h-full text-[var(--color-text-muted)] italic">
+                <Hash className="h-12 w-12 mb-4 opacity-10" />
+                <p>Welcome! Create a new channel or select an existing one.</p>
+                <button 
+                  onClick={() => setIsCreatingChannel(true)}
+                  className="mt-4 premium-button !py-2 !px-4 text-sm"
                 >
-                  <div className="flex-shrink-0">
-                    <div className="h-10 w-10 rounded-2xl bg-white/5 border border-white/5 overflow-hidden flex items-center justify-center group-hover/item:border-[var(--color-brand-primary)]/30 transition-colors">
-                      {msg.profiles?.avatar_url ? (
-                        <img src={msg.profiles.avatar_url} alt={msg.profiles.full_name} className="h-full w-full object-cover" />
-                      ) : (
-                        <span className="font-bold text-[var(--color-text-secondary)]">
-                          {msg.profiles?.full_name?.[0] || 'U'}
+                  Create Channel
+                </button>
+              </div>
+            ) : loading ? (
+              <div className="flex items-center justify-center h-full min-h-[50vh]">
+                <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-[var(--color-brand-primary)]" />
+              </div>
+            ) : messages.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full min-h-[50vh] text-[var(--color-text-muted)] italic">
+                <Send className="h-12 w-12 mb-4 opacity-10" />
+                <p>No messages yet in #{activeRoom.name}. Be the first!</p>
+              </div>
+            ) : (
+              messages.map((msg, idx) => {
+                const isOwn = msg.user_id === user?.id;
+                const cleanContent = DOMPurify.sanitize(msg.content);
+                
+                return (
+                  <div 
+                    key={msg.id} 
+                    className={cn(
+                      "flex gap-4 animate-fade-in group/item",
+                      isOwn ? "flex-row-reverse" : "flex-row"
+                    )}
+                    style={{ animationDelay: `${idx * 10}ms` }}
+                  >
+                    <div className="flex-shrink-0">
+                      <div className="h-10 w-10 rounded-2xl bg-white/5 border border-white/5 overflow-hidden flex items-center justify-center group-hover/item:border-[var(--color-brand-primary)]/30 transition-colors">
+                        {msg.profiles?.avatar_url ? (
+                          <img src={msg.profiles.avatar_url} alt={msg.profiles.full_name} className="h-full w-full object-cover" />
+                        ) : (
+                          <span className="font-bold text-[var(--color-text-secondary)]">
+                            {msg.profiles?.full_name?.[0] || 'U'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    
+                    <div className={cn("flex flex-col max-w-[85%] md:max-w-[70%]", isOwn ? "items-end" : "items-start")}>
+                      <div className="flex items-center gap-2 mb-1 px-1">
+                        <span className="text-sm font-bold">{msg.profiles?.full_name || 'Anonymous'}</span>
+                        <span className="text-[10px] text-[var(--color-text-muted)] font-medium">
+                          {formatRelative(new Date(msg.created_at), new Date())}
                         </span>
-                      )}
+                      </div>
+                      <div className={cn(
+                        "px-4 py-2.5 rounded-2xl text-[0.95rem] leading-relaxed shadow-sm transition-all break-words",
+                        isOwn 
+                          ? "bg-[var(--brand-gradient)] text-white rounded-tr-none hover:shadow-lg hover:shadow-indigo-500/20" 
+                          : "bg-white/5 border border-white/5 rounded-tl-none hover:bg-white/10"
+                      )}>
+                        <p dangerouslySetInnerHTML={{ __html: cleanContent }} />
+                      </div>
                     </div>
                   </div>
-                  
-                  <div className={cn("flex flex-col max-w-[70%]", isOwn ? "items-end" : "items-start")}>
-                    <div className="flex items-center gap-2 mb-1 px-1">
-                      <span className="text-sm font-bold">{msg.profiles?.full_name || 'Anonymous'}</span>
-                      <span className="text-[10px] text-[var(--color-text-muted)] font-medium">
-                        {formatRelative(new Date(msg.created_at), new Date())}
-                      </span>
-                    </div>
-                    <div className={cn(
-                      "px-4 py-2.5 rounded-2xl text-[0.95rem] leading-relaxed shadow-sm transition-all",
-                      isOwn 
-                        ? "bg-[var(--brand-gradient)] text-white rounded-tr-none hover:shadow-lg hover:shadow-indigo-500/20" 
-                        : "bg-white/5 border border-white/5 rounded-tl-none hover:bg-white/10"
-                    )}>
-                      <p dangerouslySetInnerHTML={{ __html: cleanContent }} />
-                    </div>
-                  </div>
-                </div>
-              );
-            })
+                );
+              })
+            )}
+            <div ref={messagesEndRef} className="mt-4" />
+          </div>
+
+          {/* Right Side Panels (Users or Settings Toggle) */}
+          {(showUsersPanel || showSettingsPanel) && (
+             <div className="w-64 border-l border-white/5 bg-black/20 glass-nav h-full animate-fade-in flex flex-col hidden md:flex">
+               {showUsersPanel && (
+                 <div className="p-4">
+                   <div className="flex items-center justify-between mb-4">
+                     <h3 className="font-bold flex items-center gap-2">
+                       <Users className="h-4 w-4 text-[var(--color-brand-primary)]" />
+                       Room Members
+                     </h3>
+                     <button onClick={() => setShowUsersPanel(false)} className="p-1 hover:bg-white/10 rounded-md text-[var(--color-text-muted)] hover:text-white transition-colors">
+                       <X className="h-4 w-4" />
+                     </button>
+                   </div>
+                   <div className="space-y-3">
+                      {Object.values(onlineUsers).map((u: any) => (
+                        <div key={u.user_id} className="flex items-center gap-3">
+                          <div className="relative">
+                            <div className="h-2 w-2 rounded-full bg-green-500 absolute -right-0.5 -bottom-0.5" />
+                            <div className="h-8 w-8 rounded-full bg-white/10 flex items-center justify-center font-bold text-xs">
+                              {u.full_name?.[0]}
+                            </div>
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium">{u.full_name}</p>
+                            <p className="text-xs text-[var(--color-text-muted)]">Online</p>
+                          </div>
+                        </div>
+                      ))}
+                   </div>
+                 </div>
+               )}
+
+               {showSettingsPanel && (
+                 <div className="p-4">
+                   <div className="flex items-center justify-between mb-4">
+                     <h3 className="font-bold flex items-center gap-2">
+                       <Settings className="h-4 w-4 text-[var(--color-brand-primary)]" />
+                       Room Settings
+                     </h3>
+                     <button onClick={() => setShowSettingsPanel(false)} className="p-1 hover:bg-white/10 rounded-md text-[var(--color-text-muted)] hover:text-white transition-colors">
+                       <X className="h-4 w-4" />
+                     </button>
+                   </div>
+                   {activeRoom ? (
+                     <div className="space-y-4">
+                       <div>
+                         <label className="text-xs text-[var(--color-text-muted)] block mb-1">Room Name</label>
+                         <p className="font-medium bg-white/5 rounded-lg p-2 text-sm">{activeRoom.name}</p>
+                       </div>
+                       <div>
+                         <label className="text-xs text-[var(--color-text-muted)] block mb-1">Room ID</label>
+                         <p className="font-mono text-xs bg-white/5 rounded-lg p-2 text-[var(--color-text-secondary)] break-all select-all">
+                           {activeRoom.id}
+                         </p>
+                       </div>
+                       <div className="pt-4 border-t border-white/5">
+                         <p className="text-xs text-[var(--color-text-muted)] mb-2">Private messaging is coming soon.</p>
+                       </div>
+                     </div>
+                   ) : (
+                     <p className="text-sm text-[var(--color-text-muted)]">Select a room first.</p>
+                   )}
+                 </div>
+               )}
+             </div>
           )}
-          <div ref={messagesEndRef} />
         </div>
 
         {/* Scroll to bottom button */}
-        {showScrollButton && (
+        {showScrollButton && activeRoom && (
           <button
             onClick={scrollToBottom}
-            className="absolute bottom-32 right-8 p-3 rounded-full bg-[var(--color-brand-primary)] text-white shadow-2xl animate-bounce hover:scale-110 transition-transform active:scale-95 z-20"
+            className="absolute bottom-24 right-8 p-3 rounded-full bg-[var(--color-brand-primary)] text-white shadow-2xl animate-bounce hover:scale-110 transition-transform active:scale-95 z-20"
           >
             <ChevronDown className="h-5 w-5" />
           </button>
         )}
 
         {/* Typing and Message Input */}
-        <div className="p-6 pt-0 bg-transparent z-10">
-          <div className="h-6 mb-2">
-            {Object.keys(typingUsers).length > 0 && (
-              <div className="text-xs text-[var(--color-text-muted)] italic transition-all flex items-center gap-2 ml-2">
-                <div className="flex gap-0.5">
-                  <span className="h-1 w-1 rounded-full bg-[var(--color-text-muted)] animate-bounce" />
-                  <span className="h-1 w-1 rounded-full bg-[var(--color-text-muted)] animate-bounce [animation-delay:0.2s]" />
-                  <span className="h-1 w-1 rounded-full bg-[var(--color-text-muted)] animate-bounce [animation-delay:0.4s]" />
+        {activeRoom && (
+          <div className="p-6 pt-2 bg-transparent z-10">
+            <div className="h-6 mb-2">
+              {Object.keys(typingUsers).length > 0 && (
+                <div className="text-xs text-[var(--color-text-muted)] italic transition-all flex items-center gap-2 ml-2">
+                  <div className="flex gap-0.5">
+                    <span className="h-1 w-1 rounded-full bg-[var(--color-text-muted)] animate-bounce" />
+                    <span className="h-1 w-1 rounded-full bg-[var(--color-text-muted)] animate-bounce [animation-delay:0.2s]" />
+                    <span className="h-1 w-1 rounded-full bg-[var(--color-text-muted)] animate-bounce [animation-delay:0.4s]" />
+                  </div>
+                  {Object.values(typingUsers).join(', ')} {Object.keys(typingUsers).length === 1 ? 'is' : 'are'} typing...
                 </div>
-                {Object.values(typingUsers).join(', ')} {Object.keys(typingUsers).length === 1 ? 'is' : 'are'} typing...
-              </div>
-            )}
-          </div>
-          
-          <form 
-            onSubmit={sendMessage}
-            className="relative flex items-center p-2 bg-white/5 border border-white/5 rounded-2xl backdrop-blur-3xl shadow-2xl focus-within:border-[var(--color-brand-primary)]/50 transition-all"
-          >
-            <input
-              type="text"
-              value={newMessage}
-              onChange={(e) => {
-                setNewMessage(e.target.value);
-                handleTyping();
-              }}
-              placeholder={`Message #${activeRoom?.name || 'channel'}`}
-              className="flex-1 bg-transparent border-none outline-none px-4 py-2 text-white placeholder:text-[var(--color-text-muted)]"
-            />
-            <button
-              type="submit"
-              disabled={!newMessage.trim()}
-              className="h-10 w-10 premium-button !p-0 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed group"
+              )}
+            </div>
+            
+            <form 
+              onSubmit={sendMessage}
+              className="relative flex items-center p-2 bg-[var(--color-bg-card)] border border-white/10 rounded-2xl backdrop-blur-3xl shadow-[0_-10px_40px_rgba(0,0,0,0.5)] focus-within:border-[var(--color-brand-primary)]/50 transition-all"
             >
-              <Send className="h-5 w-5 transition-transform group-hover:rotate-12" />
-            </button>
-          </form>
-        </div>
+              <input
+                type="text"
+                value={newMessage}
+                onChange={(e) => {
+                  setNewMessage(e.target.value);
+                  handleTyping();
+                }}
+                placeholder={`Message #${activeRoom.name}`}
+                className="flex-1 bg-transparent border-none outline-none px-4 py-2 text-white placeholder:text-[var(--color-text-muted)]"
+              />
+              <button
+                type="submit"
+                disabled={!newMessage.trim()}
+                className="h-10 w-10 premium-button !p-0 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed group"
+              >
+                <Send className="h-5 w-5 transition-transform group-hover:rotate-12" />
+              </button>
+            </form>
+          </div>
+        )}
       </main>
     </div>
   );

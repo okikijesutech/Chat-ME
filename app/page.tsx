@@ -1,3 +1,5 @@
+'use client';
+
 import Link from 'next/link';
 import { MessageSquare, Shield, Zap, Users } from 'lucide-react';
 
