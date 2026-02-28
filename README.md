@@ -6,10 +6,13 @@ Chatter is a high-performance, real-time chat application built to demonstrate a
 
 ---
 
-## 🖼 Screenshot
+## 🖼 Screenshots
 
-*(Replace this placeholder with a screenshot of your chat application)*
-![Chatter Application Screenshot](./public/screenshot.png)
+### Landing Page
+![Chatter Landing Page](./public/screenshot-landing.png)
+
+### Live Chat Interface
+![Chatter Application Interface](./public/screenshot-chat.png)
 
 ---
 
